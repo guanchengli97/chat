@@ -65,6 +65,8 @@ function ChatShell({ onSignOut }: { onSignOut: () => void }) {
     Set<string>
   >(() => new Set());
   const syncingContactUserIdsRef = useRef(new Set<string>());
+  const messagesContainerRef = useRef<HTMLDivElement | null>(null);
+  const hasPositionedMessagesRef = useRef(false);
 
   const activeContact = contacts.find((item) => item.id === activeContactId);
 
@@ -263,6 +265,37 @@ function ChatShell({ onSignOut }: { onSignOut: () => void }) {
 
     return () => subscription.unsubscribe();
   }, [activeConversation?.id]);
+
+  useEffect(() => {
+    hasPositionedMessagesRef.current = false;
+  }, [activeConversation?.id]);
+
+  useEffect(() => {
+    if (!activeContact || messages.length === 0 || hasPositionedMessagesRef.current) {
+      return;
+    }
+
+    const container = messagesContainerRef.current;
+    if (!container) return;
+
+    const firstUnread = messages.find(
+      (message) =>
+        message.senderId !== currentUserId &&
+        new Date(message.createdAt).getTime() >
+          new Date(activeContact.lastReadAt ?? 0).getTime(),
+    );
+
+    if (firstUnread) {
+      const element = container.querySelector<HTMLElement>(
+        `[data-message-id="${firstUnread.id}"]`,
+      );
+      element?.scrollIntoView({ block: 'start' });
+    } else {
+      container.scrollTop = container.scrollHeight;
+    }
+
+    hasPositionedMessagesRef.current = true;
+  }, [activeContact, currentUserId, messages]);
 
   useEffect(() => {
     if (!activeContact || messages.length === 0) return;
@@ -773,12 +806,13 @@ function ChatShell({ onSignOut }: { onSignOut: () => void }) {
               <MessageCircle size={22} />
             </header>
 
-            <div className="messages">
+            <div className="messages" ref={messagesContainerRef}>
               {messages.map((message) => (
                 <article
                   className={
                     message.senderId === currentUserId ? 'message mine' : 'message'
                   }
+                  data-message-id={message.id}
                   key={message.id}
                 >
                   <small>{message.senderName}</small>
