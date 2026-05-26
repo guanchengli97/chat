@@ -43,6 +43,7 @@ const schema = a.schema({
       displayName: a.string().required(),
       avatarKey: a.string(),
       conversationId: a.id(),
+      lastReadAt: a.datetime(),
     })
     .secondaryIndexes((index) => [
       index('ownerId'),

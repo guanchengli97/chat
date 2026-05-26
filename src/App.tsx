@@ -47,6 +47,7 @@ function ChatShell({ onSignOut }: { onSignOut: () => void }) {
   const [activeConversation, setActiveConversation] =
     useState<Conversation | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
+  const [unreadCounts, setUnreadCounts] = useState<Record<string, number>>({});
   const [draft, setDraft] = useState('');
   const [search, setSearch] = useState('');
   const [status, setStatus] = useState('正在连接...');
@@ -166,8 +167,12 @@ function ChatShell({ onSignOut }: { onSignOut: () => void }) {
       if (disposed) return;
 
       const loadedContacts = data.filter(Boolean);
-      cleanupDuplicateContacts(loadedContacts);
-      setContacts(normalizeContacts(loadedContacts));
+      setContacts((previous) => {
+        const normalizedContacts = normalizeContacts(loadedContacts);
+        return normalizedContacts.length === 0 && previous.length > 0
+          ? previous
+          : normalizedContacts;
+      });
     }
 
     async function loadRequests() {
@@ -259,6 +264,70 @@ function ChatShell({ onSignOut }: { onSignOut: () => void }) {
     return () => subscription.unsubscribe();
   }, [activeConversation?.id]);
 
+  useEffect(() => {
+    if (!activeContact || messages.length === 0) return;
+
+    const hasUnreadVisibleMessage = messages.some(
+      (message) =>
+        message.senderId !== currentUserId &&
+        new Date(message.createdAt).getTime() >
+          new Date(activeContact.lastReadAt ?? 0).getTime(),
+    );
+
+    if (hasUnreadVisibleMessage) {
+      markContactRead(activeContact);
+    }
+  }, [activeContact, currentUserId, messages]);
+
+  useEffect(() => {
+    if (!currentUserId || contacts.length === 0) {
+      return;
+    }
+
+    let disposed = false;
+
+    async function loadUnreadCounts() {
+      const entries = await Promise.all(
+        contacts.map(async (contact) => {
+          if (!contact.conversationId || contact.id === activeContactId) {
+            return [contact.id, 0] as const;
+          }
+
+          const { data } = await client.models.Message.list({
+            filter: {
+              conversationId: { eq: contact.conversationId },
+              senderId: { ne: currentUserId },
+              createdAt: { gt: contact.lastReadAt ?? new Date(0).toISOString() },
+            },
+          });
+
+          return [contact.id, data.filter(Boolean).length] as const;
+        }),
+      );
+
+      if (!disposed) {
+        setUnreadCounts(Object.fromEntries(entries));
+      }
+    }
+
+    loadUnreadCounts().catch((error: unknown) => {
+      console.error(error);
+      setStatus('未读消息同步失败');
+    });
+
+    const unreadTimer = window.setInterval(() => {
+      loadUnreadCounts().catch((error: unknown) => {
+        console.error(error);
+        setStatus('未读消息同步失败');
+      });
+    }, 3000);
+
+    return () => {
+      disposed = true;
+      window.clearInterval(unreadTimer);
+    };
+  }, [activeContactId, contacts, currentUserId]);
+
   const syncAcceptedContact = useCallback(async (request: FriendRequest) => {
     if (!request.conversationId) return;
 
@@ -280,6 +349,7 @@ function ChatShell({ onSignOut }: { onSignOut: () => void }) {
         displayName: request.toDisplayName,
         avatarKey: request.toAvatarKey,
         conversationId: request.conversationId,
+        lastReadAt: new Date().toISOString(),
       });
     } catch (error: unknown) {
       console.error(error);
@@ -447,6 +517,7 @@ function ChatShell({ onSignOut }: { onSignOut: () => void }) {
         displayName: request.fromDisplayName,
         avatarKey: request.fromAvatarKey,
         conversationId: conversation?.id,
+        lastReadAt: new Date().toISOString(),
       });
       setOptimisticHandledRequestIds((previous) =>
         new Set(previous).add(request.id),
@@ -475,6 +546,7 @@ function ChatShell({ onSignOut }: { onSignOut: () => void }) {
   async function openConversation(contact: Contact) {
     const isSameContact = contact.id === activeContactId;
     setActiveContactId(contact.id);
+    markContactRead(contact);
 
     if (contact.conversationId) {
       if (isSameContact && activeConversation?.id === contact.conversationId) {
@@ -502,8 +574,26 @@ function ChatShell({ onSignOut }: { onSignOut: () => void }) {
       await client.models.Contact.update({
         id: contact.id,
         conversationId: conversation.id,
+        lastReadAt: new Date().toISOString(),
       });
     }
+  }
+
+  async function markContactRead(contact: Contact) {
+    const now = new Date().toISOString();
+    setUnreadCounts((previous) => ({ ...previous, [contact.id]: 0 }));
+    setContacts((previous) =>
+      previous.map((item) =>
+        item.id === contact.id ? { ...item, lastReadAt: now } : item,
+      ),
+    );
+
+    await client.models.Contact.update({
+      id: contact.id,
+      lastReadAt: now,
+    }).catch((error: unknown) => {
+      console.error(error);
+    });
   }
 
   async function sendMessage() {
@@ -594,6 +684,11 @@ function ChatShell({ onSignOut }: { onSignOut: () => void }) {
                 <strong>{contact.displayName}</strong>
                 <small>{contact.conversationId ? '聊天已创建' : '点击开始聊天'}</small>
               </span>
+              {contact.id !== activeContactId && unreadCounts[contact.id] ? (
+                <span className="unread-badge">
+                  {unreadCounts[contact.id] > 99 ? '99+' : unreadCounts[contact.id]}
+                </span>
+              ) : null}
             </button>
           ))}
         </section>
@@ -750,30 +845,6 @@ function normalizeContacts(items: Contact[]) {
   return [...byContactUserId.values()].sort((left, right) =>
     left.displayName.localeCompare(right.displayName),
   );
-}
-
-function cleanupDuplicateContacts(items: Contact[]) {
-  const contactsByUserId = new Map<string, Contact[]>();
-
-  items.forEach((item) => {
-    contactsByUserId.set(item.contactUserId, [
-      ...(contactsByUserId.get(item.contactUserId) ?? []),
-      item,
-    ]);
-  });
-
-  contactsByUserId.forEach((group) => {
-    if (group.length < 2) return;
-
-    const [keeper] = normalizeContacts(group);
-    group
-      .filter((item) => item.id !== keeper.id)
-      .forEach((item) => {
-        client.models.Contact.delete({ id: item.id }).catch((error: unknown) => {
-          console.error(error);
-        });
-      });
-  });
 }
 
 export default App;
