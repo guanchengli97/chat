@@ -396,10 +396,15 @@ function ChatShell({ onSignOut }: { onSignOut: () => void }) {
   }
 
   async function openConversation(contact: Contact) {
-    setMessages([]);
+    const isSameContact = contact.id === activeContactId;
     setActiveContactId(contact.id);
 
     if (contact.conversationId) {
+      if (isSameContact && activeConversation?.id === contact.conversationId) {
+        return;
+      }
+
+      setMessages([]);
       const { data } = await client.models.Conversation.get({
         id: contact.conversationId,
       });
@@ -407,6 +412,11 @@ function ChatShell({ onSignOut }: { onSignOut: () => void }) {
       return;
     }
 
+    if (isSameContact && activeConversation?.memberIds.includes(contact.contactUserId)) {
+      return;
+    }
+
+    setMessages([]);
     const memberIds = [currentUserId, contact.contactUserId].sort();
     const conversation = await createConversation(memberIds);
     setActiveConversation(conversation);
