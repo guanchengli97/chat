@@ -24,6 +24,7 @@ type Conversation = Schema['Conversation']['type'];
 type Message = Schema['Message']['type'];
 
 const client = generateClient<Schema>();
+const maxMessageLength = 5000;
 
 function App() {
   return (
@@ -50,6 +51,18 @@ function ChatShell({ onSignOut }: { onSignOut: () => void }) {
   const [search, setSearch] = useState('');
   const [status, setStatus] = useState('正在连接...');
   const [searchStatus, setSearchStatus] = useState('输入昵称或邮箱后搜索');
+  const [sendingRequestUserIds, setSendingRequestUserIds] = useState<Set<string>>(
+    () => new Set(),
+  );
+  const [optimisticRequestUserIds, setOptimisticRequestUserIds] = useState<
+    Set<string>
+  >(() => new Set());
+  const [respondingRequestIds, setRespondingRequestIds] = useState<Set<string>>(
+    () => new Set(),
+  );
+  const [optimisticHandledRequestIds, setOptimisticHandledRequestIds] = useState<
+    Set<string>
+  >(() => new Set());
   const syncingContactUserIdsRef = useRef(new Set<string>());
 
   const activeContact = contacts.find((item) => item.id === activeContactId);
@@ -59,24 +72,29 @@ function ChatShell({ onSignOut }: { onSignOut: () => void }) {
       requests
         .filter(
           (request) =>
-            request.toUserId === currentUserId && request.status === 'PENDING',
+            request.toUserId === currentUserId &&
+            request.status === 'PENDING' &&
+            !optimisticHandledRequestIds.has(request.id),
         )
         .sort(sortByCreatedAtDesc),
-    [currentUserId, requests],
+    [currentUserId, optimisticHandledRequestIds, requests],
   );
 
   const outgoingRequestUserIds = useMemo(
     () =>
       new Set(
-        requests
-          .filter(
-            (request) =>
-              request.fromUserId === currentUserId &&
-              request.status === 'PENDING',
-          )
-          .map((request) => request.toUserId),
+        [
+          ...requests
+            .filter(
+              (request) =>
+                request.fromUserId === currentUserId &&
+                request.status === 'PENDING',
+            )
+            .map((request) => request.toUserId),
+          ...optimisticRequestUserIds,
+        ],
       ),
-    [currentUserId, requests],
+    [currentUserId, optimisticRequestUserIds, requests],
   );
 
   useEffect(() => {
@@ -169,6 +187,22 @@ function ChatShell({ onSignOut }: { onSignOut: () => void }) {
         byId.set(request.id, request);
       });
       setRequests([...byId.values()]);
+      setOptimisticRequestUserIds((previous) => {
+        const next = new Set(previous);
+        outgoing.data.filter(Boolean).forEach((request) => {
+          next.delete(request.toUserId);
+        });
+        return next.size === previous.size ? previous : next;
+      });
+      setOptimisticHandledRequestIds((previous) => {
+        const next = new Set(previous);
+        incoming.data
+          .filter((request) => request?.status !== 'PENDING')
+          .forEach((request) => {
+            next.delete(request.id);
+          });
+        return next.size === previous.size ? previous : next;
+      });
     }
 
     loadContacts().catch((error: unknown) => {
@@ -341,49 +375,92 @@ function ChatShell({ onSignOut }: { onSignOut: () => void }) {
     const isContact = contacts.some(
       (contact) => contact.contactUserId === person.userId,
     );
-    if (isContact || outgoingRequestUserIds.has(person.userId)) return;
+    if (
+      isContact ||
+      outgoingRequestUserIds.has(person.userId) ||
+      sendingRequestUserIds.has(person.userId)
+    ) {
+      return;
+    }
 
-    await client.models.FriendRequest.create({
-      fromUserId: currentUserId,
-      fromDisplayName: profile.displayName,
-      fromAvatarKey: profile.avatarKey,
-      toUserId: person.userId,
-      toDisplayName: person.displayName,
-      toAvatarKey: person.avatarKey,
-      status: 'PENDING',
-      participantIds: [currentUserId, person.userId].sort(),
-      createdAt: new Date().toISOString(),
-    });
+    setSendingRequestUserIds((previous) => new Set(previous).add(person.userId));
+
+    try {
+      await client.models.FriendRequest.create({
+        fromUserId: currentUserId,
+        fromDisplayName: profile.displayName,
+        fromAvatarKey: profile.avatarKey,
+        toUserId: person.userId,
+        toDisplayName: person.displayName,
+        toAvatarKey: person.avatarKey,
+        status: 'PENDING',
+        participantIds: [currentUserId, person.userId].sort(),
+        createdAt: new Date().toISOString(),
+      });
+      setOptimisticRequestUserIds((previous) =>
+        new Set(previous).add(person.userId),
+      );
+    } catch (error: unknown) {
+      console.error(error);
+      setStatus('好友请求发送失败');
+    } finally {
+      setSendingRequestUserIds((previous) => {
+        const next = new Set(previous);
+        next.delete(person.userId);
+        return next;
+      });
+    }
   }
 
   async function respondToRequest(
     request: FriendRequest,
     status: 'ACCEPTED' | 'REJECTED',
   ) {
-    if (status === 'REJECTED') {
+    if (respondingRequestIds.has(request.id)) return;
+
+    setRespondingRequestIds((previous) => new Set(previous).add(request.id));
+
+    try {
+      if (status === 'REJECTED') {
+        await client.models.FriendRequest.update({
+          id: request.id,
+          status,
+        });
+        setOptimisticHandledRequestIds((previous) =>
+          new Set(previous).add(request.id),
+        );
+        return;
+      }
+
+      const memberIds = [request.fromUserId, request.toUserId].sort();
+      const conversation = await createConversation(memberIds);
+
       await client.models.FriendRequest.update({
         id: request.id,
         status,
+        conversationId: conversation?.id,
       });
-      return;
+
+      await client.models.Contact.create({
+        ownerId: request.toUserId,
+        contactUserId: request.fromUserId,
+        displayName: request.fromDisplayName,
+        avatarKey: request.fromAvatarKey,
+        conversationId: conversation?.id,
+      });
+      setOptimisticHandledRequestIds((previous) =>
+        new Set(previous).add(request.id),
+      );
+    } catch (error: unknown) {
+      console.error(error);
+      setStatus('好友请求处理失败');
+    } finally {
+      setRespondingRequestIds((previous) => {
+        const next = new Set(previous);
+        next.delete(request.id);
+        return next;
+      });
     }
-
-    const memberIds = [request.fromUserId, request.toUserId].sort();
-    const conversation = await createConversation(memberIds);
-
-    await client.models.FriendRequest.update({
-      id: request.id,
-      status,
-      conversationId: conversation?.id,
-    });
-
-    await client.models.Contact.create({
-      ownerId: request.toUserId,
-      contactUserId: request.fromUserId,
-      displayName: request.fromDisplayName,
-      avatarKey: request.fromAvatarKey,
-      conversationId: conversation?.id,
-    });
   }
 
   async function createConversation(memberIds: string[]) {
@@ -432,6 +509,10 @@ function ChatShell({ onSignOut }: { onSignOut: () => void }) {
   async function sendMessage() {
     const body = draft.trim();
     if (!body || !activeConversation?.id) return;
+    if (body.length > maxMessageLength) {
+      setStatus(`消息最多 ${maxMessageLength} 个字符`);
+      return;
+    }
 
     setDraft('');
     const now = new Date().toISOString();
@@ -525,22 +606,30 @@ function ChatShell({ onSignOut }: { onSignOut: () => void }) {
             incomingRequests.map((request) => (
               <div className="request-row" key={request.id}>
                 <span>{request.fromDisplayName}</span>
-                <button
-                  className="mini-button"
-                  type="button"
-                  title="接受"
-                  onClick={() => respondToRequest(request, 'ACCEPTED')}
-                >
-                  <Check size={15} />
-                </button>
-                <button
-                  className="mini-button"
-                  type="button"
-                  title="拒绝"
-                  onClick={() => respondToRequest(request, 'REJECTED')}
-                >
-                  <X size={15} />
-                </button>
+                {respondingRequestIds.has(request.id) ? (
+                  <span className="mini-spinner">
+                    <span className="spinner" />
+                  </span>
+                ) : (
+                  <>
+                    <button
+                      className="mini-button"
+                      type="button"
+                      title="接受"
+                      onClick={() => respondToRequest(request, 'ACCEPTED')}
+                    >
+                      <Check size={15} />
+                    </button>
+                    <button
+                      className="mini-button"
+                      type="button"
+                      title="拒绝"
+                      onClick={() => respondToRequest(request, 'REJECTED')}
+                    >
+                      <X size={15} />
+                    </button>
+                  </>
+                )}
               </div>
             ))
           )}
@@ -551,18 +640,25 @@ function ChatShell({ onSignOut }: { onSignOut: () => void }) {
               (contact) => contact.contactUserId === person.userId,
             );
             const isPending = outgoingRequestUserIds.has(person.userId);
+            const isSending = sendingRequestUserIds.has(person.userId);
             return (
               <button
                 key={person.id}
                 type="button"
-                disabled={isContact || isPending}
+                disabled={isContact || isPending || isSending}
                 onClick={() => sendFriendRequest(person)}
               >
-                <UserRound size={16} />
+                {isSending ? <span className="spinner" /> : <UserRound size={16} />}
                 <span>
                   {person.displayName}
                   <small>
-                    {isContact ? '已是联系人' : isPending ? '请求已发送' : '发送请求'}
+                    {isContact
+                      ? '已是联系人'
+                      : isSending
+                        ? '发送中...'
+                        : isPending
+                          ? '请求已发送'
+                          : '发送请求'}
                   </small>
                 </span>
               </button>
@@ -600,6 +696,7 @@ function ChatShell({ onSignOut }: { onSignOut: () => void }) {
               <textarea
                 value={draft}
                 placeholder="输入消息"
+                maxLength={maxMessageLength}
                 onChange={(event) => setDraft(event.target.value)}
                 onKeyDown={(event) => {
                   if (event.key === 'Enter' && !event.shiftKey) {

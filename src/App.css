@@ -1,17 +1,19 @@
 .chat-app {
   display: grid;
   grid-template-columns: 340px minmax(0, 1fr);
-  min-height: 100vh;
+  height: 100vh;
+  overflow: hidden;
   background: #f5f7fb;
   color: #172033;
 }
 
 .sidebar {
   display: flex;
-  min-height: 100vh;
+  min-height: 0;
   flex-direction: column;
   border-right: 1px solid #d9e0eb;
   background: #ffffff;
+  overflow: hidden;
 }
 
 .profile {
@@ -205,6 +207,15 @@
   font-size: 12px;
 }
 
+.spinner {
+  width: 16px;
+  height: 16px;
+  border: 2px solid #b8c2d3;
+  border-top-color: #1f8f65;
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+
 .muted {
   margin: 6px 8px 14px;
 }
@@ -234,11 +245,20 @@
   text-align: center !important;
 }
 
+.mini-spinner {
+  display: grid;
+  grid-column: span 2;
+  height: 32px;
+  place-items: center;
+}
+
 .conversation {
   display: grid;
   min-width: 0;
   grid-template-rows: 72px minmax(0, 1fr) auto;
-  min-height: 100vh;
+  min-height: 0;
+  height: 100vh;
+  overflow: hidden;
 }
 
 .conversation header {
@@ -263,6 +283,7 @@
 
 .messages {
   display: flex;
+  min-height: 0;
   flex-direction: column;
   gap: 10px;
   overflow-y: auto;
@@ -358,18 +379,28 @@
   margin: 0;
 }
 
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
 @media (max-width: 760px) {
   .chat-app {
     grid-template-columns: 1fr;
+    height: 100dvh;
+    overflow: auto;
   }
 
   .sidebar {
-    min-height: auto;
+    min-height: 38vh;
+    max-height: 38vh;
     border-right: 0;
     border-bottom: 1px solid #d9e0eb;
   }
 
   .conversation {
-    min-height: 62vh;
+    height: 62vh;
+    min-height: 0;
   }
 }
