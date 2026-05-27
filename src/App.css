@@ -322,6 +322,13 @@
   align-self: flex-start;
 }
 
+.loading-row {
+  align-self: center;
+  color: #667085;
+  font-size: 12px;
+  padding: 6px 10px;
+}
+
 .message small {
   display: block;
   margin: 0 0 4px 4px;

@@ -26,6 +26,7 @@ type Message = Schema['Message']['type'];
 
 const client = generateClient<Schema>();
 const maxMessageLength = 5000;
+const messagePageSize = 20;
 
 function App() {
   return (
@@ -49,6 +50,8 @@ function ChatShell({ onSignOut }: { onSignOut: () => void }) {
   const [activeConversation, setActiveConversation] =
     useState<Conversation | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
+  const [messageNextToken, setMessageNextToken] = useState<string | null>(null);
+  const [isLoadingOlderMessages, setIsLoadingOlderMessages] = useState(false);
   const [unreadCounts, setUnreadCounts] = useState<Record<string, number>>({});
   const [draft, setDraft] = useState('');
   const [search, setSearch] = useState('');
@@ -69,6 +72,7 @@ function ChatShell({ onSignOut }: { onSignOut: () => void }) {
   const syncingContactUserIdsRef = useRef(new Set<string>());
   const messagesContainerRef = useRef<HTMLDivElement | null>(null);
   const hasPositionedMessagesRef = useRef(false);
+  const shouldStickToBottomRef = useRef(true);
 
   const activeContact = contacts.find((item) => item.id === activeContactId);
 
@@ -248,28 +252,58 @@ function ChatShell({ onSignOut }: { onSignOut: () => void }) {
   useEffect(() => {
     if (!activeConversation?.id) return;
 
-    const subscription = client.models.Message.observeQuery({
-      filter: { conversationId: { eq: activeConversation.id } },
-    }).subscribe({
-      next: ({ items }) =>
-        setMessages(
-          items.filter(Boolean).sort(
-            (left, right) =>
-              new Date(left.createdAt).getTime() -
-              new Date(right.createdAt).getTime(),
-          ),
-        ),
-      error: (error) => {
-        console.error(error);
-        setStatus('消息同步失败');
-      },
+    let disposed = false;
+
+    async function loadLatestMessages() {
+      if (!activeConversation?.id) return;
+
+      const { data, nextToken } =
+        await client.models.Message.listMessageByConversationIdAndCreatedAt(
+          { conversationId: activeConversation.id },
+          { limit: messagePageSize, sortDirection: 'DESC' },
+        );
+
+      if (disposed) return;
+
+      setMessages(sortMessages(data.filter(Boolean)));
+      setMessageNextToken(nextToken ?? null);
+    }
+
+    async function pollLatestMessages() {
+      if (!activeConversation?.id) return;
+
+      const { data } =
+        await client.models.Message.listMessageByConversationIdAndCreatedAt(
+          { conversationId: activeConversation.id },
+          { limit: messagePageSize, sortDirection: 'DESC' },
+        );
+
+      if (!disposed) {
+        setMessages((previous) => mergeMessages(previous, data.filter(Boolean)));
+      }
+    }
+
+    loadLatestMessages().catch((error: unknown) => {
+      console.error(error);
+      setStatus('消息同步失败');
     });
 
-    return () => subscription.unsubscribe();
+    const messageTimer = window.setInterval(() => {
+      pollLatestMessages().catch((error: unknown) => {
+        console.error(error);
+        setStatus('消息同步失败');
+      });
+    }, 2000);
+
+    return () => {
+      disposed = true;
+      window.clearInterval(messageTimer);
+    };
   }, [activeConversation?.id]);
 
   useEffect(() => {
     hasPositionedMessagesRef.current = false;
+    shouldStickToBottomRef.current = true;
   }, [activeConversation?.id]);
 
   useEffect(() => {
@@ -297,6 +331,19 @@ function ChatShell({ onSignOut }: { onSignOut: () => void }) {
     }
 
     hasPositionedMessagesRef.current = true;
+  }, [activeContact, currentUserId, messages]);
+
+  useEffect(() => {
+    if (!activeContact || messages.length === 0 || !hasPositionedMessagesRef.current) {
+      return;
+    }
+
+    if (shouldStickToBottomRef.current) {
+      const container = messagesContainerRef.current;
+      if (container) {
+        container.scrollTop = container.scrollHeight;
+      }
+    }
   }, [activeContact, currentUserId, messages]);
 
   useEffect(() => {
@@ -590,6 +637,7 @@ function ChatShell({ onSignOut }: { onSignOut: () => void }) {
       }
 
       setMessages([]);
+      setMessageNextToken(null);
       const { data } = await client.models.Conversation.get({
         id: contact.conversationId,
       });
@@ -602,6 +650,7 @@ function ChatShell({ onSignOut }: { onSignOut: () => void }) {
     }
 
     setMessages([]);
+    setMessageNextToken(null);
     const memberIds = [currentUserId, contact.contactUserId].sort();
     const conversation = await createConversation(memberIds);
     setActiveConversation(conversation);
@@ -620,6 +669,7 @@ function ChatShell({ onSignOut }: { onSignOut: () => void }) {
     setActiveContactId('');
     setActiveConversation(null);
     setMessages([]);
+    setMessageNextToken(null);
   }
 
   async function markContactRead(contact: Contact) {
@@ -637,6 +687,49 @@ function ChatShell({ onSignOut }: { onSignOut: () => void }) {
     }).catch((error: unknown) => {
       console.error(error);
     });
+  }
+
+  async function loadOlderMessages() {
+    if (
+      !activeConversation?.id ||
+      !messageNextToken ||
+      isLoadingOlderMessages
+    ) {
+      return;
+    }
+
+    const container = messagesContainerRef.current;
+    const previousScrollHeight = container?.scrollHeight ?? 0;
+
+    setIsLoadingOlderMessages(true);
+
+    try {
+      const { data, nextToken } =
+        await client.models.Message.listMessageByConversationIdAndCreatedAt(
+          { conversationId: activeConversation.id },
+          {
+            limit: messagePageSize,
+            nextToken: messageNextToken,
+            sortDirection: 'DESC',
+          },
+        );
+
+      setMessages((previous) => mergeMessages(data.filter(Boolean), previous));
+      setMessageNextToken(nextToken ?? null);
+
+      window.requestAnimationFrame(() => {
+        const currentContainer = messagesContainerRef.current;
+        if (!currentContainer) return;
+
+        currentContainer.scrollTop =
+          currentContainer.scrollHeight - previousScrollHeight;
+      });
+    } catch (error: unknown) {
+      console.error(error);
+      setStatus('更早消息加载失败');
+    } finally {
+      setIsLoadingOlderMessages(false);
+    }
   }
 
   async function sendMessage() {
@@ -823,7 +916,21 @@ function ChatShell({ onSignOut }: { onSignOut: () => void }) {
               <MessageCircle size={22} />
             </header>
 
-            <div className="messages" ref={messagesContainerRef}>
+            <div
+              className="messages"
+              ref={messagesContainerRef}
+              onScroll={(event) => {
+                const element = event.currentTarget;
+                shouldStickToBottomRef.current =
+                  element.scrollHeight - element.scrollTop - element.clientHeight < 80;
+                if (element.scrollTop < 24) {
+                  loadOlderMessages();
+                }
+              }}
+            >
+              {isLoadingOlderMessages ? (
+                <div className="loading-row">加载更早消息...</div>
+              ) : null}
               {messages.map((message) => (
                 <article
                   className={
@@ -871,6 +978,23 @@ function ChatShell({ onSignOut }: { onSignOut: () => void }) {
 
 function sortByCreatedAtDesc(left: FriendRequest, right: FriendRequest) {
   return new Date(right.createdAt).getTime() - new Date(left.createdAt).getTime();
+}
+
+function sortMessages(items: Message[]) {
+  return [...items].sort(
+    (left, right) =>
+      new Date(left.createdAt).getTime() - new Date(right.createdAt).getTime(),
+  );
+}
+
+function mergeMessages(left: Message[], right: Message[]) {
+  const byId = new Map<string, Message>();
+
+  [...left, ...right].forEach((item) => {
+    byId.set(item.id, item);
+  });
+
+  return sortMessages([...byId.values()]);
 }
 
 function normalizeContacts(items: Contact[]) {
