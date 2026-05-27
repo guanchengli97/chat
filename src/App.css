@@ -405,6 +405,23 @@
   background: #d9f99d;
 }
 
+.message.sending p {
+  opacity: 0.72;
+}
+
+.message.failed p {
+  background: #fee4e2;
+  color: #991b1b;
+}
+
+.delivery-status {
+  color: #98a2b3;
+}
+
+.message.failed .delivery-status {
+  color: #d92d20;
+}
+
 .conversation-notice {
   margin: 0 18px 10px;
   border: 1px solid #fed7aa;

@@ -24,6 +24,9 @@ type FriendRequest = Schema['FriendRequest']['type'];
 type Contact = Schema['Contact']['type'];
 type Conversation = Schema['Conversation']['type'];
 type Message = Schema['Message']['type'];
+type ChatMessage = Message & {
+  deliveryStatus?: 'sending' | 'failed';
+};
 
 const client = generateClient<Schema>();
 const maxMessageLength = 5000;
@@ -50,7 +53,7 @@ function ChatShell({ onSignOut }: { onSignOut: () => void }) {
   const [mobileConversationOpen, setMobileConversationOpen] = useState(false);
   const [activeConversation, setActiveConversation] =
     useState<Conversation | null>(null);
-  const [messages, setMessages] = useState<Message[]>([]);
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [messageNextToken, setMessageNextToken] = useState<string | null>(null);
   const [isLoadingOlderMessages, setIsLoadingOlderMessages] = useState(false);
   const [unreadCounts, setUnreadCounts] = useState<Record<string, number>>({});
@@ -916,6 +919,24 @@ function ChatShell({ onSignOut }: { onSignOut: () => void }) {
 
     setConversationNotice('');
 
+    const now = new Date().toISOString();
+    const localMessageId = `local-${crypto.randomUUID()}`;
+    const optimisticMessage = {
+      id: localMessageId,
+      conversationId: activeConversation.id,
+      senderId: currentUserId,
+      senderName: profile?.displayName ?? email,
+      body,
+      messageType: 'TEXT',
+      createdAt: now,
+      memberIds: [...activeConversation.memberIds],
+      deliveryStatus: 'sending',
+    } as ChatMessage;
+
+    setDraft('');
+    shouldStickToBottomRef.current = true;
+    setMessages((previous) => mergeMessages(previous, [optimisticMessage]));
+
     try {
       const { data: latestConversation } = await client.models.Conversation.get({
         id: activeConversation.id,
@@ -929,12 +950,17 @@ function ChatShell({ onSignOut }: { onSignOut: () => void }) {
       ) {
         setConversationNotice('消息发送失败：对方已删除联系人');
         setStatus('消息发送失败：对方已删除联系人');
+        setMessages((previous) =>
+          previous.map((message) =>
+            message.id === localMessageId
+              ? { ...message, deliveryStatus: 'failed' }
+              : message,
+          ),
+        );
         return;
       }
 
-      const now = new Date().toISOString();
-
-      await client.models.Message.create({
+      const { data: createdMessage } = await client.models.Message.create({
         conversationId: conversation.id,
         senderId: currentUserId,
         senderName: profile?.displayName ?? email,
@@ -950,12 +976,26 @@ function ChatShell({ onSignOut }: { onSignOut: () => void }) {
         lastMessageAt: now,
       });
 
-      setDraft('');
+      if (createdMessage) {
+        setMessages((previous) =>
+          mergeMessages(
+            previous.filter((message) => message.id !== localMessageId),
+            [createdMessage],
+          ),
+        );
+      }
       setActiveConversation(conversation);
     } catch (error: unknown) {
       console.error(error);
       setConversationNotice('消息发送失败，请稍后重试');
       setStatus('消息发送失败');
+      setMessages((previous) =>
+        previous.map((message) =>
+          message.id === localMessageId
+            ? { ...message, deliveryStatus: 'failed' }
+            : message,
+        ),
+      );
     }
   }
 
@@ -1151,13 +1191,24 @@ function ChatShell({ onSignOut }: { onSignOut: () => void }) {
               {messages.map((message) => (
                 <article
                   className={
-                    message.senderId === currentUserId ? 'message mine' : 'message'
+                    [
+                      'message',
+                      message.senderId === currentUserId ? 'mine' : '',
+                      message.deliveryStatus ? message.deliveryStatus : '',
+                    ]
+                      .filter(Boolean)
+                      .join(' ')
                   }
                   data-message-id={message.id}
                   key={message.id}
                 >
                   <small>{message.senderName}</small>
                   <p>{message.body}</p>
+                  {message.deliveryStatus ? (
+                    <small className="delivery-status">
+                      {message.deliveryStatus === 'sending' ? '发送中...' : '发送失败'}
+                    </small>
+                  ) : null}
                 </article>
               ))}
             </div>
@@ -1201,15 +1252,15 @@ function sortByCreatedAtDesc(left: FriendRequest, right: FriendRequest) {
   return new Date(right.createdAt).getTime() - new Date(left.createdAt).getTime();
 }
 
-function sortMessages(items: Message[]) {
+function sortMessages(items: ChatMessage[]) {
   return [...items].sort(
     (left, right) =>
       new Date(left.createdAt).getTime() - new Date(right.createdAt).getTime(),
   );
 }
 
-function mergeMessages(left: Message[], right: Message[]) {
-  const byId = new Map<string, Message>();
+function mergeMessages(left: ChatMessage[], right: ChatMessage[]) {
+  const byId = new Map<string, ChatMessage>();
 
   [...left, ...right].forEach((item) => {
     byId.set(item.id, item);
