@@ -276,12 +276,25 @@
 }
 
 .conversation header {
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
-  justify-content: space-between;
+  gap: 12px;
   padding: 0 24px;
   border-bottom: 1px solid #d9e0eb;
   background: #ffffff;
+}
+
+.back-button {
+  display: none;
+  width: 40px;
+  height: 40px;
+  place-items: center;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: #172033;
+  cursor: pointer;
 }
 
 .conversation h1 {
@@ -403,18 +416,65 @@
   .chat-app {
     grid-template-columns: 1fr;
     height: 100dvh;
-    overflow: auto;
+    overflow: hidden;
   }
 
   .sidebar {
-    min-height: 38vh;
-    max-height: 38vh;
+    display: flex;
+    min-height: 0;
+    max-height: none;
+    height: 100dvh;
     border-right: 0;
-    border-bottom: 1px solid #d9e0eb;
+    border-bottom: 0;
+  }
+
+  .contacts {
+    flex: 1 1 auto;
+  }
+
+  .people {
+    max-height: 34vh;
+    overflow-y: auto;
   }
 
   .conversation {
-    height: 62vh;
+    display: none;
+    height: 100dvh;
     min-height: 0;
+  }
+
+  .chat-app.chat-open .sidebar {
+    display: none;
+  }
+
+  .chat-app.chat-open .conversation {
+    display: grid;
+  }
+
+  .chat-app.chat-open .empty-state {
+    min-height: 100dvh;
+  }
+
+  .conversation header {
+    grid-template-columns: 40px minmax(0, 1fr) auto;
+    padding: 0 12px;
+  }
+
+  .back-button {
+    display: grid;
+  }
+
+  .conversation footer {
+    grid-template-columns: minmax(0, 1fr) 76px;
+    gap: 8px;
+    padding: 10px;
+  }
+
+  .conversation footer button {
+    gap: 4px;
+  }
+
+  .messages {
+    padding: 14px;
   }
 }

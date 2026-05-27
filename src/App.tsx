@@ -12,6 +12,7 @@ import {
   Send,
   Upload,
   UserRound,
+  ArrowLeft,
   X,
 } from 'lucide-react';
 import type { Schema } from '../amplify/data/resource';
@@ -44,6 +45,7 @@ function ChatShell({ onSignOut }: { onSignOut: () => void }) {
   const [requests, setRequests] = useState<FriendRequest[]>([]);
   const [searchResults, setSearchResults] = useState<UserProfile[]>([]);
   const [activeContactId, setActiveContactId] = useState('');
+  const [mobileConversationOpen, setMobileConversationOpen] = useState(false);
   const [activeConversation, setActiveConversation] =
     useState<Conversation | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
@@ -578,6 +580,7 @@ function ChatShell({ onSignOut }: { onSignOut: () => void }) {
 
   async function openConversation(contact: Contact) {
     const isSameContact = contact.id === activeContactId;
+    setMobileConversationOpen(true);
     setActiveContactId(contact.id);
     markContactRead(contact);
 
@@ -610,6 +613,13 @@ function ChatShell({ onSignOut }: { onSignOut: () => void }) {
         lastReadAt: new Date().toISOString(),
       });
     }
+  }
+
+  function closeMobileConversation() {
+    setMobileConversationOpen(false);
+    setActiveContactId('');
+    setActiveConversation(null);
+    setMessages([]);
   }
 
   async function markContactRead(contact: Contact) {
@@ -658,7 +668,7 @@ function ChatShell({ onSignOut }: { onSignOut: () => void }) {
   }
 
   return (
-    <main className="chat-app">
+    <main className={mobileConversationOpen ? 'chat-app chat-open' : 'chat-app'}>
       <aside className="sidebar">
         <section className="profile">
           <div className="avatar">
@@ -799,6 +809,13 @@ function ChatShell({ onSignOut }: { onSignOut: () => void }) {
         {activeContact ? (
           <>
             <header>
+              <button
+                className="back-button"
+                type="button"
+                onClick={closeMobileConversation}
+              >
+                <ArrowLeft size={20} />
+              </button>
               <div>
                 <h1>{activeContact.displayName}</h1>
                 <span>{messages.length} 条消息</span>
