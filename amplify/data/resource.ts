@@ -58,6 +58,7 @@ const schema = a.schema({
     .model({
       type: a.enum(['DIRECT']),
       memberIds: a.string().array().required(),
+      deletedByUserIds: a.string().array(),
       lastMessageText: a.string(),
       lastMessageAt: a.datetime(),
     })

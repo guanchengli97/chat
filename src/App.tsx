@@ -13,6 +13,7 @@ import {
   Upload,
   UserRound,
   ArrowLeft,
+  Trash2,
   X,
 } from 'lucide-react';
 import type { Schema } from '../amplify/data/resource';
@@ -54,6 +55,7 @@ function ChatShell({ onSignOut }: { onSignOut: () => void }) {
   const [isLoadingOlderMessages, setIsLoadingOlderMessages] = useState(false);
   const [unreadCounts, setUnreadCounts] = useState<Record<string, number>>({});
   const [draft, setDraft] = useState('');
+  const [conversationNotice, setConversationNotice] = useState('');
   const [search, setSearch] = useState('');
   const [status, setStatus] = useState('正在连接...');
   const [searchStatus, setSearchStatus] = useState('输入昵称或邮箱后搜索');
@@ -69,6 +71,12 @@ function ChatShell({ onSignOut }: { onSignOut: () => void }) {
   const [optimisticHandledRequestIds, setOptimisticHandledRequestIds] = useState<
     Set<string>
   >(() => new Set());
+  const [deletingContactIds, setDeletingContactIds] = useState<Set<string>>(
+    () => new Set(),
+  );
+  const [removedContactUserIds, setRemovedContactUserIds] = useState<Set<string>>(
+    () => new Set(),
+  );
   const syncingContactUserIdsRef = useRef(new Set<string>());
   const messagesContainerRef = useRef<HTMLDivElement | null>(null);
   const hasPositionedMessagesRef = useRef(false);
@@ -174,11 +182,16 @@ function ChatShell({ onSignOut }: { onSignOut: () => void }) {
 
       if (disposed) return;
 
-      const loadedContacts = data.filter(Boolean);
+      const loadedContacts = data
+        .filter(Boolean)
+        .filter((contact) => !removedContactUserIds.has(contact.contactUserId));
       setContacts((previous) => {
         const normalizedContacts = normalizeContacts(loadedContacts);
-        return normalizedContacts.length === 0 && previous.length > 0
-          ? previous
+        const retainedPrevious = previous.filter(
+          (contact) => !removedContactUserIds.has(contact.contactUserId),
+        );
+        return normalizedContacts.length === 0 && retainedPrevious.length > 0
+          ? retainedPrevious
           : normalizedContacts;
       });
     }
@@ -199,7 +212,15 @@ function ChatShell({ onSignOut }: { onSignOut: () => void }) {
       [...incoming.data, ...outgoing.data].filter(Boolean).forEach((request) => {
         byId.set(request.id, request);
       });
-      setRequests([...byId.values()]);
+      setRequests(
+        [...byId.values()].filter((request) => {
+          const otherUserId =
+            request.fromUserId === currentUserId
+              ? request.toUserId
+              : request.fromUserId;
+          return !removedContactUserIds.has(otherUserId);
+        }),
+      );
       setOptimisticRequestUserIds((previous) => {
         const next = new Set(previous);
         outgoing.data.filter(Boolean).forEach((request) => {
@@ -247,7 +268,7 @@ function ChatShell({ onSignOut }: { onSignOut: () => void }) {
       window.clearInterval(contactTimer);
       window.clearInterval(requestTimer);
     };
-  }, [currentUserId]);
+  }, [currentUserId, removedContactUserIds]);
 
   useEffect(() => {
     if (!activeConversation?.id) return;
@@ -450,13 +471,14 @@ function ChatShell({ onSignOut }: { onSignOut: () => void }) {
         request.status === 'ACCEPTED' &&
         request.conversationId &&
         !contacts.some((contact) => contact.contactUserId === request.toUserId) &&
+        !removedContactUserIds.has(request.toUserId) &&
         !syncingContactUserIdsRef.current.has(request.toUserId),
     );
 
     acceptedOutgoing.forEach((request) => {
       syncAcceptedContact(request);
     });
-  }, [contacts, currentUserId, requests, syncAcceptedContact]);
+  }, [contacts, currentUserId, removedContactUserIds, requests, syncAcceptedContact]);
 
   async function loadAvatar(key?: string | null) {
     if (!key) {
@@ -524,6 +546,13 @@ function ChatShell({ onSignOut }: { onSignOut: () => void }) {
   async function sendFriendRequest(person: UserProfile) {
     if (!profile || person.userId === currentUserId) return;
 
+    setRemovedContactUserIds((previous) => {
+      if (!previous.has(person.userId)) return previous;
+      const next = new Set(previous);
+      next.delete(person.userId);
+      return next;
+    });
+
     const isContact = contacts.some(
       (contact) => contact.contactUserId === person.userId,
     );
@@ -571,6 +600,12 @@ function ChatShell({ onSignOut }: { onSignOut: () => void }) {
     if (respondingRequestIds.has(request.id)) return;
 
     setRespondingRequestIds((previous) => new Set(previous).add(request.id));
+    setRemovedContactUserIds((previous) => {
+      if (!previous.has(request.fromUserId)) return previous;
+      const next = new Set(previous);
+      next.delete(request.fromUserId);
+      return next;
+    });
 
     try {
       if (status === 'REJECTED') {
@@ -617,9 +652,35 @@ function ChatShell({ onSignOut }: { onSignOut: () => void }) {
   }
 
   async function createConversation(memberIds: string[]) {
+    const normalizedMemberIds = [...memberIds].sort();
+    const existingConversation = await findDirectConversation(normalizedMemberIds);
+
+    if (existingConversation) {
+      const restoredDeletedByUserIds = removeIds(
+        existingConversation.deletedByUserIds,
+        normalizedMemberIds,
+      );
+
+      if (
+        restoredDeletedByUserIds.length !==
+        (existingConversation.deletedByUserIds ?? []).filter(Boolean).length
+      ) {
+        const { data: restoredConversation } =
+          await client.models.Conversation.update({
+            id: existingConversation.id,
+            deletedByUserIds: restoredDeletedByUserIds,
+          });
+
+        return restoredConversation ?? existingConversation;
+      }
+
+      return existingConversation;
+    }
+
     const { data } = await client.models.Conversation.create({
       type: 'DIRECT',
-      memberIds,
+      memberIds: normalizedMemberIds,
+      deletedByUserIds: [],
     });
 
     return data;
@@ -629,6 +690,7 @@ function ChatShell({ onSignOut }: { onSignOut: () => void }) {
     const isSameContact = contact.id === activeContactId;
     setMobileConversationOpen(true);
     setActiveContactId(contact.id);
+    setConversationNotice('');
     markContactRead(contact);
 
     if (contact.conversationId) {
@@ -670,6 +732,7 @@ function ChatShell({ onSignOut }: { onSignOut: () => void }) {
     setActiveConversation(null);
     setMessages([]);
     setMessageNextToken(null);
+    setConversationNotice('');
   }
 
   async function markContactRead(contact: Contact) {
@@ -687,6 +750,116 @@ function ChatShell({ onSignOut }: { onSignOut: () => void }) {
     }).catch((error: unknown) => {
       console.error(error);
     });
+  }
+
+  async function deleteContact(contact: Contact) {
+    if (deletingContactIds.has(contact.id)) return;
+
+    const confirmed = window.confirm(`删除联系人 ${contact.displayName}？`);
+    if (!confirmed) return;
+
+    setDeletingContactIds((previous) => new Set(previous).add(contact.id));
+    setRemovedContactUserIds((previous) =>
+      new Set(previous).add(contact.contactUserId),
+    );
+
+    try {
+      const [contactResult, incomingRequestsResult, outgoingRequestsResult] =
+        await Promise.all([
+          client.models.Contact.list({
+            filter: {
+              ownerId: { eq: currentUserId },
+              contactUserId: { eq: contact.contactUserId },
+            },
+          }),
+          client.models.FriendRequest.listFriendRequestByToUserId({
+            toUserId: currentUserId,
+          }),
+          client.models.FriendRequest.listFriendRequestByFromUserId({
+            fromUserId: currentUserId,
+          }),
+        ]);
+
+      const contactsToDelete = contactResult.data.filter(Boolean);
+      const requestsToDelete = [
+        ...incomingRequestsResult.data,
+        ...outgoingRequestsResult.data,
+      ]
+        .filter(Boolean)
+        .filter(
+          (request) =>
+            (request.fromUserId === currentUserId &&
+              request.toUserId === contact.contactUserId) ||
+            (request.fromUserId === contact.contactUserId &&
+              request.toUserId === currentUserId),
+        );
+      const conversationUpdate = contact.conversationId
+        ? client.models.Conversation.update({
+            id: contact.conversationId,
+            deletedByUserIds: mergeUniqueIds(
+              activeConversation?.id === contact.conversationId
+                ? activeConversation.deletedByUserIds
+                : undefined,
+              currentUserId,
+            ),
+          })
+        : Promise.resolve();
+
+      await Promise.all([
+        conversationUpdate,
+        ...contactsToDelete.map((item) =>
+          client.models.Contact.delete({ id: item.id }),
+        ),
+        ...requestsToDelete.map((request) =>
+          client.models.FriendRequest.delete({ id: request.id }),
+        ),
+      ]);
+
+      setContacts((previous) =>
+        previous.filter((item) => item.contactUserId !== contact.contactUserId),
+      );
+      setRequests((previous) =>
+        previous.filter(
+          (request) =>
+            !(
+              (request.fromUserId === currentUserId &&
+                request.toUserId === contact.contactUserId) ||
+              (request.fromUserId === contact.contactUserId &&
+                request.toUserId === currentUserId)
+            ),
+        ),
+      );
+      setUnreadCounts((previous) => {
+        const next = { ...previous };
+        contactsToDelete.forEach((item) => {
+          delete next[item.id];
+        });
+        delete next[contact.id];
+        return next;
+      });
+
+      if (activeContactId === contact.id) {
+        setActiveContactId('');
+        setMobileConversationOpen(false);
+        setActiveConversation(null);
+        setMessages([]);
+        setMessageNextToken(null);
+      }
+    } catch (error: unknown) {
+      console.error(error);
+      setStatus('联系人删除失败');
+      setRemovedContactUserIds((previous) => {
+        const next = new Set(previous);
+        next.delete(contact.contactUserId);
+        return next;
+      });
+    } finally {
+      setDeletingContactIds((previous) => {
+        const next = new Set(previous);
+        next.delete(contact.id);
+        return next;
+      });
+    }
   }
 
   async function loadOlderMessages() {
@@ -736,28 +909,54 @@ function ChatShell({ onSignOut }: { onSignOut: () => void }) {
     const body = draft.trim();
     if (!body || !activeConversation?.id) return;
     if (body.length > maxMessageLength) {
+      setConversationNotice(`消息最多 ${maxMessageLength} 个字符`);
       setStatus(`消息最多 ${maxMessageLength} 个字符`);
       return;
     }
 
-    setDraft('');
-    const now = new Date().toISOString();
+    setConversationNotice('');
 
-    await client.models.Message.create({
-      conversationId: activeConversation.id,
-      senderId: currentUserId,
-      senderName: profile?.displayName ?? email,
-      body,
-      messageType: 'TEXT',
-      createdAt: now,
-      memberIds: [...activeConversation.memberIds],
-    });
+    try {
+      const { data: latestConversation } = await client.models.Conversation.get({
+        id: activeConversation.id,
+      });
+      const conversation = latestConversation ?? activeConversation;
+      const otherMemberId = getOtherMemberId(conversation, currentUserId);
 
-    await client.models.Conversation.update({
-      id: activeConversation.id,
-      lastMessageText: body,
-      lastMessageAt: now,
-    });
+      if (
+        otherMemberId &&
+        conversation.deletedByUserIds?.includes(otherMemberId)
+      ) {
+        setConversationNotice('消息发送失败：对方已删除联系人');
+        setStatus('消息发送失败：对方已删除联系人');
+        return;
+      }
+
+      const now = new Date().toISOString();
+
+      await client.models.Message.create({
+        conversationId: conversation.id,
+        senderId: currentUserId,
+        senderName: profile?.displayName ?? email,
+        body,
+        messageType: 'TEXT',
+        createdAt: now,
+        memberIds: [...conversation.memberIds],
+      });
+
+      await client.models.Conversation.update({
+        id: conversation.id,
+        lastMessageText: body,
+        lastMessageAt: now,
+      });
+
+      setDraft('');
+      setActiveConversation(conversation);
+    } catch (error: unknown) {
+      console.error(error);
+      setConversationNotice('消息发送失败，请稍后重试');
+      setStatus('消息发送失败');
+    }
   }
 
   return (
@@ -807,12 +1006,15 @@ function ChatShell({ onSignOut }: { onSignOut: () => void }) {
         <section className="contacts">
           <h2>联系人</h2>
           {contacts.map((contact) => (
-            <button
-              className={contact.id === activeContactId ? 'active' : ''}
+            <div
+              className={contact.id === activeContactId ? 'contact-row active' : 'contact-row'}
               key={contact.id}
-              type="button"
-              onClick={() => openConversation(contact)}
             >
+              <button
+                className="contact-main"
+                type="button"
+                onClick={() => openConversation(contact)}
+              >
               <span className="contact-avatar">
                 {(contact.displayName || '?').slice(0, 1).toUpperCase()}
               </span>
@@ -825,7 +1027,22 @@ function ChatShell({ onSignOut }: { onSignOut: () => void }) {
                   {unreadCounts[contact.id] > 99 ? '99+' : unreadCounts[contact.id]}
                 </span>
               ) : null}
-            </button>
+              </button>
+              <button
+                className="contact-delete"
+                type="button"
+                title="删除联系人"
+                aria-label={`删除联系人 ${contact.displayName}`}
+                disabled={deletingContactIds.has(contact.id)}
+                onClick={() => deleteContact(contact)}
+              >
+                {deletingContactIds.has(contact.id) ? (
+                  <span className="spinner" />
+                ) : (
+                  <Trash2 size={16} />
+                )}
+              </button>
+            </div>
           ))}
         </section>
 
@@ -945,6 +1162,10 @@ function ChatShell({ onSignOut }: { onSignOut: () => void }) {
               ))}
             </div>
 
+            {conversationNotice ? (
+              <div className="conversation-notice">{conversationNotice}</div>
+            ) : null}
+
             <footer>
               <textarea
                 value={draft}
@@ -995,6 +1216,52 @@ function mergeMessages(left: Message[], right: Message[]) {
   });
 
   return sortMessages([...byId.values()]);
+}
+
+async function findDirectConversation(memberIds: string[]) {
+  const { data } = await client.models.Conversation.list();
+  const normalizedMemberIds = [...memberIds].sort();
+
+  return data
+    .filter(Boolean)
+    .find((conversation) =>
+      hasSameMembers(conversation.memberIds, normalizedMemberIds),
+    );
+}
+
+function hasSameMembers(
+  currentMemberIds: (string | null)[] | null | undefined,
+  targetMemberIds: string[],
+) {
+  const normalizedCurrentMemberIds = (currentMemberIds ?? [])
+    .filter(Boolean)
+    .sort();
+
+  return (
+    normalizedCurrentMemberIds.length === targetMemberIds.length &&
+    normalizedCurrentMemberIds.every(
+      (memberId, index) => memberId === targetMemberIds[index],
+    )
+  );
+}
+
+function getOtherMemberId(conversation: Conversation, currentUserId: string) {
+  return conversation.memberIds.find((memberId) => memberId !== currentUserId) ?? '';
+}
+
+function mergeUniqueIds(items: (string | null)[] | null | undefined, id: string) {
+  return [...new Set([...(items ?? []).filter(Boolean), id])];
+}
+
+function removeIds(
+  items: (string | null)[] | null | undefined,
+  idsToRemove: string[],
+) {
+  const idsToRemoveSet = new Set(idsToRemove);
+  return (items ?? []).filter((item): item is string => {
+    if (!item) return false;
+    return !idsToRemoveSet.has(item);
+  });
 }
 
 function normalizeContacts(items: Contact[]) {
